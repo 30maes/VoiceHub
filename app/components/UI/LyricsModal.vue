@@ -208,6 +208,14 @@
 
               <!-- 歌词设置工具栏 -->
               <div v-if="activePanel === 'lyrics'" class="lyric-toolbar">
+                <div
+                  v-if="hasLyricsForCopy"
+                  class="toolbar-btn"
+                  :title="locale.copyLyric"
+                  @click="copyLyrics"
+                >
+                  <Copy :size="20" />
+                </div>
                 <Popover placement="top-end" :offset="12">
                   <template #trigger>
                     <div class="toolbar-btn" :title="locale.settings">
@@ -415,6 +423,7 @@ import { useBackgroundRenderer } from '~/composables/useBackgroundRenderer'
 import Icon from '~/components/UI/Icon.vue'
 import AppSpinner from '~/components/UI/Common/AppSpinner.vue'
 import { useAudioQuality } from '~/composables/useAudioQuality'
+import { getCachedMusicUrlQuality } from '~/utils/musicUrl'
 import { useAudioPlayerEnhanced } from '~/composables/useAudioPlayerEnhanced'
 import { useAudioVisualizer } from '~/composables/useAudioVisualizer'
 import { convertToHttps, getCoverLargeUrl, getSizedCoverUrl } from '~/utils/url'
@@ -424,6 +433,9 @@ import Popover from '~/components/UI/Common/Popover.vue'
 import VolumeControl from '~/components/UI/AudioPlayer/VolumeControl.vue'
 import SongComments from '~/components/UI/SongComments.vue'
 import { useLocale } from '~/utils/locale'
+import { useToast } from '~/composables/useToast'
+import { getLineRomanization, getLineText } from '~/utils/lyric/lyricText'
+import { Copy } from '@lucide/vue'
 
 const props = defineProps({
   isVisible: {
@@ -439,6 +451,7 @@ const audioPlayer = useAudioPlayer()
 const audioPlayerControl = useAudioPlayerControl()
 const lyricSettings = useLyricSettings()
 const { ui } = useLocale()
+const { showToast } = useToast()
 const locale = computed(() => ui.value?.lyricsModal || {})
 
 // 背景渲染器
@@ -489,7 +502,7 @@ const playMode = computed(() => audioPlayerControl.playMode.value)
 const isLoadingTrack = computed(() => audioPlayerControl.isLoadingTrack.value)
 const currentTime = computed(() => audioPlayer.getCurrentPosition().value)
 const duration = computed(() => audioPlayer.getDuration().value)
-const { getQuality, getQualityLabel, getQualityOptions, saveQuality } = useAudioQuality()
+const { getQuality, getQualityLabel, getQualityOptions, saveQuality, getNeteaseQualityLabel } = useAudioQuality()
 const enhanced = useAudioPlayerEnhanced()
 const lyricManager = useLyricManager()
 const currentCoverUrl = computed(() =>
@@ -509,17 +522,51 @@ const currentLyricLine = computed(() => {
   return lyric?.content?.trim() || ''
 })
 
+/** 可复制歌词行：与渲染层共用同一份共享歌词状态 */
+const hasLyricsForCopy = computed(() => (lyricManager.lyrics.value?.length ?? 0) > 0)
+
+/**
+ * 复制整首歌词为纯文本
+ * 内容跟随当前显示设置：翻译、音译按开关附加，背景和声行不参与
+ */
+const copyLyrics = async () => {
+  const parts = []
+  for (const line of lyricManager.lyrics.value ?? []) {
+    if (line.isBG) continue
+    const text = getLineText(line).trim()
+    if (!text) continue
+    const translated = lyricSettings.showTranslation.value ? line.translatedLyric?.trim() || '' : ''
+    const roma = lyricSettings.showRoma.value ? getLineRomanization(line).trim() : ''
+    // 音译是否排在翻译前由 swapTranRoma 决定，与歌词渲染保持一致
+    const subLines = lyricSettings.swapTranRoma.value ? [roma, translated] : [translated, roma]
+    parts.push(text, ...subLines.filter(Boolean))
+  }
+  if (!parts.length) return
+  try {
+    await navigator.clipboard.writeText(parts.join('\n'))
+    showToast(locale.value.copiedLyric, 'success')
+  } catch {
+    showToast(locale.value.copyLyricFailed, 'error')
+  }
+}
+
 const canShowComments = computed(() => {
   const song = currentSong.value
   if (!song || !['netease', 'tencent'].includes(song.musicPlatform)) return false
   return /^\d+$/.test(String(song.musicId || '').trim()) || song.musicPlatform === 'tencent'
 })
 
+const reportedQuality = computed(() => audioPlayerControl.isLoadingTrack.value ? undefined
+  : getCachedMusicUrlQuality(currentSong.value?.musicUrl || audioPlayerControl.audioPlayer.value?.currentSrc || audioPlayerControl.audioPlayer.value?.src))
+// 返回音质仅在接口 level 可识别时覆盖显示；未知音质（含未登录走解锁链路）沿用请求音质
+const actualQualityLabel = computed(() =>
+  ['netease', 'netease-podcast'].includes(currentSong.value?.musicPlatform)
+    ? getNeteaseQualityLabel(reportedQuality.value) : null)
 const currentQualityText = computed(() => {
   const platform = currentSong.value?.musicPlatform
   if (!platform) return locale.value.quality
   const quality = getQuality(platform)
-  const label = getQualityLabel(platform, quality)
+  const label = actualQualityLabel.value || getQualityLabel(platform, quality)
   return label.replace(/音质|音乐|quality|music/gi, '').trim() || locale.value.quality
 })
 
@@ -543,6 +590,10 @@ const currentPlatformOptions = computed(() => {
 })
 
 const isCurrentQuality = (qualityValue) => {
+  if (actualQualityLabel.value) {
+    const matched = currentPlatformOptions.value.find(option => option.level === reportedQuality.value)?.value
+    if (matched !== undefined) return matched === qualityValue
+  }
   const platform = currentSong.value?.musicPlatform
   if (!platform) return false
   return getQuality(platform) === qualityValue
@@ -1957,6 +2008,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  gap: 0.5rem;
 }
 
 .toolbar-btn {
